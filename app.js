@@ -1,4 +1,6 @@
-// ─── i18n ───
+// ─── i18n ────────────────────────────────────────────────────────────────────
+// All user-visible strings keyed by language code.
+// String values are plain text; keys ending in a function accept parameters.
 const I18N = {
   vi: {
     title: 'Sửa file xlsx<br>khi export từ <span class="em">Google Sheets</span><br><span class="strike">bị lệch font</span>',
@@ -83,6 +85,8 @@ const I18N = {
 let currentLang = 'ja';
 const t = () => I18N[currentLang];
 
+// Apply a language: update all data-i18n elements, rebuild the issues grid,
+// and refresh the file list (button label changes per language).
 function applyLang(lang) {
   currentLang = lang;
   document.body.setAttribute('data-lang', lang);
@@ -117,20 +121,22 @@ document.querySelectorAll('.lang-switch button').forEach(b => {
   b.addEventListener('click', () => applyLang(b.getAttribute('data-lang')));
 });
 
-// ─── Refs ───
+// ─── DOM references ───────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
-const fileInput = $('fileInput');
-const uploader = $('uploader');
-const fileList = $('fileList');
-const fileSummary = $('fileSummary');
+const fileInput      = $('fileInput');
+const uploader       = $('uploader');
+const fileList       = $('fileList');
+const fileSummary    = $('fileSummary');
 const fileSummaryText = $('fileSummaryText');
-const fileClearAll = $('fileClearAll');
-const btnLabel = $('btnLabel');
-const processBtn = $('processBtn');
-const logEl = $('log');
+const fileClearAll   = $('fileClearAll');
+const btnLabel       = $('btnLabel');
+const processBtn     = $('processBtn');
+const logEl          = $('log');
 
-let selectedFiles = [];
+// ─── File state ───────────────────────────────────────────────────────────────
+let selectedFiles = []; // Array of { file: File, bad: boolean }
 
+// Append a timestamped line to the log panel.
 function log(msg, type = '') {
   logEl.classList.add('active');
   const ts = new Date().toLocaleTimeString('en-GB');
@@ -145,6 +151,8 @@ function isValidXlsx(file) {
   return file.name.toLowerCase().endsWith('.xlsx');
 }
 
+// Re-render the file list and update the process button state.
+// Called whenever selectedFiles changes or the language switches.
 function renderFileList() {
   const dict = t();
   fileList.innerHTML = '';
@@ -171,6 +179,7 @@ function renderFileList() {
       </div>
       <button class="file-clear" type="button" title="Clear" data-idx="${idx}">×</button>
     `;
+    // Set file name via textContent to avoid XSS
     card.querySelector('.file-name').textContent = entry.file.name;
     fileList.appendChild(card);
   });
@@ -201,6 +210,7 @@ fileClearAll.addEventListener('click', (e) => {
   clearAllFiles();
 });
 
+// Delegate remove-button clicks inside the file list
 fileList.addEventListener('click', (e) => {
   const btn = e.target.closest('.file-clear');
   if (!btn) return;
@@ -209,6 +219,7 @@ fileList.addEventListener('click', (e) => {
   if (!Number.isNaN(idx)) removeFileAt(idx);
 });
 
+// ─── Drag-and-drop ────────────────────────────────────────────────────────────
 ['dragenter', 'dragover'].forEach(evt => {
   uploader.addEventListener(evt, (e) => { e.preventDefault(); uploader.classList.add('dragover'); });
 });
@@ -222,9 +233,10 @@ uploader.addEventListener('drop', (e) => {
 fileInput.addEventListener('change', (e) => {
   const files = Array.from(e.target.files || []);
   if (files.length) handleFiles(files);
-  fileInput.value = '';
+  fileInput.value = ''; // reset so the same file can be re-selected
 });
 
+// Add files to selectedFiles, skipping exact duplicates (name + size + mtime).
 function handleFiles(files) {
   for (const file of files) {
     const dup = selectedFiles.some(e =>
@@ -238,56 +250,107 @@ function handleFiles(files) {
   renderFileList();
 }
 
-// ─── Helpers ───
+// ─── Text measurement helpers ─────────────────────────────────────────────────
 
-const CJK_RE = /[\u3000-\u9fff\uff00-\uffef]/g;
-function visualWidth(text) {
-  if (!text) return 0;
-  const s = String(text);
-  const cjk = (s.match(CJK_RE) || []).length;
-  return cjk * 2 + (s.length - cjk);
+// Reusable Canvas 2D context — used only for measureText(), never rendered.
+const _measCtx = document.createElement('canvas').getContext('2d');
+
+// Max-digit width (MDW): pixel width of '0' in Excel's Normal font (Calibri 11pt).
+// Excel column width is expressed in units of this character width, so MDW is
+// the conversion factor from Excel char units → CSS pixels.
+const _normalMDW = (() => {
+  _measCtx.font = '11pt Calibri, Arial, sans-serif';
+  return _measCtx.measureText('0').width;
+})();
+
+// Count the number of wrapped lines for a single text segment (no newlines).
+// Mimics Excel's word-wrap rules:
+//   • Segments containing spaces  → break on word boundaries (Latin style)
+//   • Segments with no spaces     → break at any character boundary (CJK style)
+// If a single word is wider than colPx, it is further split at character boundaries.
+function _wrapSegment(segment, colPx) {
+  const totalW = _measCtx.measureText(segment).width;
+  if (totalW <= colPx) return 1; // fits on one line — fast path
+
+  // No spaces: pure CJK or single long token — divide by column width
+  if (!segment.includes(' ')) return Math.max(1, Math.ceil(totalW / colPx));
+
+  // Word-wrap simulation
+  const spaceW = _measCtx.measureText(' ').width;
+  let lines = 1;
+  let lineW = 0;
+  for (const word of segment.split(' ')) {
+    const wW = _measCtx.measureText(word).width;
+    if (lineW === 0) {
+      if (wW > colPx) {
+        // Word itself overflows — split it at character boundaries
+        const extra = Math.ceil(wW / colPx) - 1;
+        lines += extra;
+        lineW = wW % colPx || colPx; // remaining width on the last overflow line
+      } else {
+        lineW = wW;
+      }
+    } else if (lineW + spaceW + wW > colPx) {
+      // Word does not fit on current line — start a new one
+      lines++;
+      if (wW > colPx) {
+        const extra = Math.ceil(wW / colPx) - 1;
+        lines += extra;
+        lineW = wW % colPx || colPx;
+      } else {
+        lineW = wW;
+      }
+    } else {
+      lineW += spaceW + wW;
+    }
+  }
+  return lines;
 }
 
-function estimateLines(text, colW) {
+// Estimate the total number of display lines for a cell value,
+// using the cell's actual font family and size for accurate measurement.
+// colWidthChars is Excel's column width in Normal-font character units.
+function measureTextLines(text, colWidthChars, fontSize, fontFamily) {
   if (text === null || text === undefined) return 1;
   const s = String(text);
   if (!s) return 1;
-  const parts = s.split('\n');
+
+  // Convert column width to pixels; subtract 1 char unit for Excel's cell padding
+  const colPx = Math.max(1, (colWidthChars - 1) * _normalMDW);
+  _measCtx.font = `${fontSize}pt ${fontFamily}`;
+
   let total = 0;
-  for (const part of parts) {
-    if (!part) { total += 1; continue; }
-    const w = visualWidth(part);
-    total += Math.max(1, Math.ceil(w / Math.max(1, colW)));
+  for (const segment of s.split('\n')) {
+    // Explicit line breaks (Alt+Enter in Excel) always count as a new line
+    if (!segment) { total += 1; continue; }
+    total += _wrapSegment(segment, colPx);
   }
   return total;
 }
 
-function maxLineWidth(text) {
-  if (!text) return 0;
-  const parts = String(text).split('\n');
-  let max = 0;
-  for (const p of parts) {
-    const w = visualWidth(p);
-    if (w > max) max = w;
-  }
-  return max;
-}
-
+// Extract the plain-text display value from any ExcelJS cell value type.
+// Handles formulas (use result), rich text (join runs), hyperlinks, and primitives.
 function resolveDisplayValue(value) {
   if (value === null || value === undefined) return '';
   if (typeof value === 'object') {
     if ('result' in value) return value.result === null || value.result === undefined ? '' : value.result;
     if ('richText' in value) return value.richText.map(r => r.text).join('');
-    if ('formula' in value) return '';
+    if ('formula' in value) return ''; // formula with no cached result
     if ('text' in value) return value.text;
     return '';
   }
   return value;
 }
 
-const lineHeightForSize = (fs) => Math.max(15, fs * 1.5);
+// Row height (in points) required for N lines of a given font size.
+// Factor 1.35 matches Excel's AutoFit behaviour for CJK fonts (Yu Gothic ~15pt/line at 11pt).
+// Minimum 15pt prevents excessively short rows for small font sizes.
+const lineHeightForSize = (fs) => Math.max(15, fs * 1.35);
 
-// ─── Main: 3-pass processing ───
+// ─── Core xlsx processing ─────────────────────────────────────────────────────
+
+// Process a single .xlsx file through three read-only → plan → write passes,
+// then trigger a browser download of the fixed file.
 async function processSingleFile(file, targetFont, alignMode) {
   const buf = await file.arrayBuffer();
   log(t().logRead((buf.byteLength / 1024).toFixed(1)));
@@ -297,209 +360,219 @@ async function processSingleFile(file, targetFont, alignMode) {
   log(t().logLoaded(wb.worksheets.length), 'ok');
 
   for (const ws of wb.worksheets) {
-      // ════════════════════════════════════════════════════
-      // PASS 1: PHÂN TÍCH FILE (KHÔNG SỬA)
-      // ════════════════════════════════════════════════════
 
-      const merges = [];
-      try {
-        const list = (ws.model && ws.model.merges) ? ws.model.merges : [];
-        for (const m of list) {
-          const [tl, br] = m.split(':');
-          const tlCell = ws.getCell(tl);
-          const brCell = br ? ws.getCell(br) : tlCell;
-          merges.push({
-            minRow: tlCell.row, maxRow: brCell.row,
-            minCol: tlCell.col, maxCol: brCell.col,
-          });
-        }
-      } catch (e) {}
+    // ── PASS 1: ANALYSE ───────────────────────────────────────────────────────
+    // Read merge ranges, record original alignment and row heights.
+    // No mutations happen here — data is collected for the planning pass.
 
-      const insideMerged = new Set();
-      const masterOf = new Map();
-      for (const m of merges) {
-        masterOf.set(`${m.minRow},${m.minCol}`, m);
-        for (let r = m.minRow; r <= m.maxRow; r++) {
-          for (let c = m.minCol; c <= m.maxCol; c++) {
-            if (!(r === m.minRow && c === m.minCol)) insideMerged.add(`${r},${c}`);
-          }
+    // Parse merge ranges from the worksheet model into structured objects
+    const merges = [];
+    try {
+      const list = (ws.model && ws.model.merges) ? ws.model.merges : [];
+      for (const m of list) {
+        const [tl, br] = m.split(':');
+        const tlCell = ws.getCell(tl);
+        const brCell = br ? ws.getCell(br) : tlCell;
+        merges.push({
+          minRow: tlCell.row, maxRow: brCell.row,
+          minCol: tlCell.col, maxCol: brCell.col,
+        });
+      }
+    } catch (e) {}
+
+    // insideMerged: keys of slave cells (all cells except the top-left master)
+    // masterOf: maps a master cell key → its merge descriptor
+    const insideMerged = new Set();
+    const masterOf = new Map();
+    for (const m of merges) {
+      masterOf.set(`${m.minRow},${m.minCol}`, m);
+      for (let r = m.minRow; r <= m.maxRow; r++) {
+        for (let c = m.minCol; c <= m.maxCol; c++) {
+          if (!(r === m.minRow && c === m.minCol)) insideMerged.add(`${r},${c}`);
         }
       }
+    }
 
-      const hasContent = new Set();
-      const originalAlign = new Map();
-      const rowOriginalHeight = new Map();
+    const hasContent       = new Set();
+    const originalAlign    = new Map(); // key → original horizontal alignment string
+    const rowOriginalHeight = new Map(); // rowNum → original height in points
 
-      ws.eachRow({ includeEmpty: false }, (row, rowNum) => {
-        rowOriginalHeight.set(rowNum, row.height || 15);
-        row.eachCell({ includeEmpty: false }, (cell, colNum) => {
-          if (cell.value !== null && cell.value !== undefined && cell.value !== '') {
-            hasContent.add(`${rowNum},${colNum}`);
-            const a = cell.alignment || {};
-            originalAlign.set(`${rowNum},${colNum}`, a.horizontal || 'general');
-          }
-        });
+    ws.eachRow({ includeEmpty: false }, (row, rowNum) => {
+      rowOriginalHeight.set(rowNum, row.height || 15);
+      row.eachCell({ includeEmpty: false }, (cell, colNum) => {
+        if (cell.value !== null && cell.value !== undefined && cell.value !== '') {
+          hasContent.add(`${rowNum},${colNum}`);
+          const a = cell.alignment || {};
+          originalAlign.set(`${rowNum},${colNum}`, a.horizontal || 'general');
+        }
       });
+    });
 
-      // ════════════════════════════════════════════════════
-      // PASS 2: TÍNH wrap & chiều cao cần cho từng ô CÓ CONTENT
-      //   Quy tắc: text vượt quá độ rộng cột gốc → BUỘC wrap
-      //   (không cho tràn sang ô bên cạnh)
-      // ════════════════════════════════════════════════════
+    // ── PASS 2: PLAN ──────────────────────────────────────────────────────────
+    // For every master cell with content, calculate:
+    //   • target horizontal / vertical alignment
+    //   • number of wrapped lines (using Canvas text measurement)
+    // Results are stored in cellPlan; no worksheet mutations yet.
 
-      const cellPlan = new Map();
+    const cellPlan = new Map(); // key → { wrap, neededLines, rowSpan, fontSize, plannedH, plannedV }
 
-      ws.eachRow({ includeEmpty: false }, (row, rowNum) => {
-        row.eachCell({ includeEmpty: false }, (cell, colNum) => {
-          if (cell.value === null || cell.value === undefined || cell.value === '') return;
-          const key = `${rowNum},${colNum}`;
-          if (insideMerged.has(key)) return;
+    ws.eachRow({ includeEmpty: false }, (row, rowNum) => {
+      row.eachCell({ includeEmpty: false }, (cell, colNum) => {
+        if (cell.value === null || cell.value === undefined || cell.value === '') return;
+        const key = `${rowNum},${colNum}`;
+        if (insideMerged.has(key)) return; // slave cells are handled in PASS 3
 
-          // Tính alignment trước — không phụ thuộc vào displayVal
-          let plannedH, plannedV;
+        // Resolve target alignment — independent of the cell's display value
+        let plannedH, plannedV;
+        if (alignMode === 'keep') {
+          plannedH = originalAlign.get(key) || 'general';
+          plannedV = (cell.alignment || {}).vertical || 'middle';
+        } else if (alignMode === 'left-center') {
+          plannedH = 'left'; plannedV = 'middle';
+        } else if (alignMode === 'center-center') {
+          plannedH = 'center'; plannedV = 'middle';
+        } else if (alignMode === 'right-center') {
+          plannedH = 'right'; plannedV = 'middle';
+        } else { // auto: numbers → right, everything else → left
+          plannedV = 'middle';
+          const isNumber = typeof cell.value === 'number' ||
+            cell.value instanceof Date ||
+            (cell.value && typeof cell.value === 'object' && typeof cell.value.result === 'number');
+          plannedH = isNumber ? 'right' : 'left';
+        }
+
+        const fs = (cell.font?.size) || 11;
+
+        const displayVal = resolveDisplayValue(cell.value);
+        if (displayVal === '' || displayVal === null) {
+          // Cell has a value but renders empty (e.g. a formula returning '').
+          // Still record alignment so PASS 3 can apply it correctly.
+          cellPlan.set(key, { wrap: true, neededLines: 1, rowSpan: 1, fontSize: fs, plannedH, plannedV });
+          return;
+        }
+
+        // For merged cells, sum the width of all spanned columns
+        const merge = masterOf.get(key);
+        let baseW = 0;
+        let rowSpan = 1;
+        if (merge) {
+          for (let c = merge.minCol; c <= merge.maxCol; c++) {
+            baseW += (ws.getColumn(c).width || 8.43);
+          }
+          rowSpan = merge.maxRow - merge.minRow + 1;
+        } else {
+          baseW = ws.getColumn(colNum).width || 8.43;
+        }
+
+        // Subtract 1 char unit to account for Excel's internal cell padding
+        const usableBase = Math.max(2, baseW - 1);
+        const fontName = targetFont === 'keep' ? (cell.font?.name || 'Yu Gothic') : targetFont;
+        const neededLines = measureTextLines(displayVal, usableBase, fs, fontName);
+
+        cellPlan.set(key, { wrap: true, neededLines, rowSpan, fontSize: fs, plannedH, plannedV });
+      });
+    });
+
+    // ── PASS 3: APPLY ─────────────────────────────────────────────────────────
+    // Write font, alignment (wrapText = true), and row heights to the workbook.
+    // Row height is the maximum required height across all cells in that row.
+
+    let cellsInSheet  = 0;
+    let wrappedCount  = 0;
+    const rowNeededHeight = new Map(); // rowNum → max required height in points
+
+    ws.eachRow({ includeEmpty: false }, (row, rowNum) => {
+      row.eachCell({ includeEmpty: false }, (cell, colNum) => {
+        if (cell.value === null || cell.value === undefined || cell.value === '') return;
+        cellsInSheet++;
+        const key = `${rowNum},${colNum}`;
+
+        // Apply font — preserve all decorative properties, only change the name
+        const oldFont = cell.font || {};
+        cell.font = {
+          name:      targetFont === 'keep' ? (oldFont.name || 'Yu Gothic') : targetFont,
+          size:      oldFont.size || 11,
+          bold:      oldFont.bold || false,
+          italic:    oldFont.italic || false,
+          underline: oldFont.underline,
+          strike:    oldFont.strike,
+          color:     oldFont.color,
+        };
+
+        // Slave cells of a merge range: apply alignment option and force wrapText.
+        // Height is driven by the master cell, so no height calculation here.
+        if (insideMerged.has(key)) {
+          const oldA = cell.alignment || {};
+          let slaveH, slaveV;
           if (alignMode === 'keep') {
-            plannedH = originalAlign.get(key) || 'general';
-            plannedV = (cell.alignment || {}).vertical || 'middle';
+            slaveH = oldA.horizontal || 'general'; slaveV = oldA.vertical || 'middle';
           } else if (alignMode === 'left-center') {
-            plannedH = 'left'; plannedV = 'middle';
+            slaveH = 'left'; slaveV = 'middle';
           } else if (alignMode === 'center-center') {
-            plannedH = 'center'; plannedV = 'middle';
+            slaveH = 'center'; slaveV = 'middle';
           } else if (alignMode === 'right-center') {
-            plannedH = 'right'; plannedV = 'middle';
+            slaveH = 'right'; slaveV = 'middle';
           } else { // auto
-            plannedV = 'middle';
-            const isNumber = typeof cell.value === 'number' ||
-              cell.value instanceof Date ||
-              (cell.value && typeof cell.value === 'object' && typeof cell.value.result === 'number');
-            plannedH = isNumber ? 'right' : 'left';
+            slaveH = oldA.horizontal || 'general'; slaveV = 'middle';
           }
-
-          const fs = (cell.font?.size) || 11;
-
-          const displayVal = resolveDisplayValue(cell.value);
-          if (displayVal === '' || displayVal === null) {
-            // Ô có value nhưng display rỗng (vd: công thức trả về '') — vẫn lưu alignment
-            cellPlan.set(key, { wrap: true, neededLines: 1, rowSpan: 1, fontSize: fs, plannedH, plannedV });
-            return;
-          }
-
-          const merge = masterOf.get(key);
-          let baseW = 0;
-          let rowSpan = 1;
-          if (merge) {
-            for (let c = merge.minCol; c <= merge.maxCol; c++) {
-              baseW += (ws.getColumn(c).width || 8.43);
-            }
-            rowSpan = merge.maxRow - merge.minRow + 1;
-          } else {
-            baseW = ws.getColumn(colNum).width || 8.43;
-          }
-
-          const usableBase = Math.max(2, baseW - 1);
-          const wrap = true;
-          const neededLines = estimateLines(displayVal, usableBase);
-
-          cellPlan.set(key, { wrap, neededLines, rowSpan, fontSize: fs, plannedH, plannedV });
-        });
-      });
-
-      // ════════════════════════════════════════════════════
-      // PASS 3: ÁP DỤNG THAY ĐỔI
-      // ════════════════════════════════════════════════════
-
-      let cellsInSheet = 0;
-      let wrappedCount = 0;
-      const rowNeededHeight = new Map();
-
-      ws.eachRow({ includeEmpty: false }, (row, rowNum) => {
-        row.eachCell({ includeEmpty: false }, (cell, colNum) => {
-          if (cell.value === null || cell.value === undefined || cell.value === '') return;
-          cellsInSheet++;
-          const key = `${rowNum},${colNum}`;
-
-          // ─── Font ───
-          const oldFont = cell.font || {};
-          cell.font = {
-            name: targetFont === 'keep' ? (oldFont.name || 'Yu Gothic') : targetFont,
-            size: oldFont.size || 11,
-            bold: oldFont.bold || false,
-            italic: oldFont.italic || false,
-            underline: oldFont.underline,
-            strike: oldFont.strike,
-            color: oldFont.color,
-          };
-
-          // ─── Cell bị merge che (slave) — áp dụng alignment theo option, wrapText luôn true ───
-          if (insideMerged.has(key)) {
-            const oldA = cell.alignment || {};
-            let slaveH, slaveV;
-            if (alignMode === 'keep') {
-              slaveH = oldA.horizontal || 'general'; slaveV = oldA.vertical || 'middle';
-            } else if (alignMode === 'left-center') {
-              slaveH = 'left'; slaveV = 'middle';
-            } else if (alignMode === 'center-center') {
-              slaveH = 'center'; slaveV = 'middle';
-            } else if (alignMode === 'right-center') {
-              slaveH = 'right'; slaveV = 'middle';
-            } else { // auto
-              slaveH = oldA.horizontal || 'general'; slaveV = 'middle';
-            }
-            cell.alignment = {
-              horizontal: slaveH,
-              vertical: slaveV,
-              wrapText: true,
-              textRotation: oldA.textRotation,
-              indent: oldA.indent,
-              shrinkToFit: false,
-            };
-            return;
-          }
-
-          const plan = cellPlan.get(key);
-          if (!plan) return;
-
-          // ─── Alignment — dùng plannedH/plannedV đã tính sẵn từ PASS 2 ───
-          const oldAlign = cell.alignment || {};
           cell.alignment = {
-            horizontal: plan.plannedH,
-            vertical: plan.plannedV,
-            wrapText: plan.wrap,
-            textRotation: oldAlign.textRotation,
-            indent: oldAlign.indent,
-            shrinkToFit: false,
+            horizontal:   slaveH,
+            vertical:     slaveV,
+            wrapText:     true,
+            textRotation: oldA.textRotation,
+            indent:       oldA.indent,
+            shrinkToFit:  false,
           };
+          return;
+        }
 
-          if (plan.wrap) wrappedCount++;
+        const plan = cellPlan.get(key);
+        if (!plan) return;
 
-          // ─── Chiều cao cần — luôn tính để fit text (kể cả 1 dòng) ───
-          {
-            const linesPerRow = Math.ceil(plan.neededLines / plan.rowSpan);
-            const perLine = lineHeightForSize(plan.fontSize);
-            const neededH = linesPerRow * perLine + 2;
+        // Apply alignment using values pre-computed in PASS 2
+        const oldAlign = cell.alignment || {};
+        cell.alignment = {
+          horizontal:   plan.plannedH,
+          vertical:     plan.plannedV,
+          wrapText:     plan.wrap,
+          textRotation: oldAlign.textRotation,
+          indent:       oldAlign.indent,
+          shrinkToFit:  false,
+        };
 
-            for (let r = rowNum; r < rowNum + plan.rowSpan; r++) {
-              const cur = rowNeededHeight.get(r) || 0;
-              if (cur < neededH) rowNeededHeight.set(r, neededH);
-            }
+        if (plan.wrap) wrappedCount++;
+
+        // Compute the required row height for this cell and propagate it to
+        // all rows spanned by the merge (rowSpan = 1 for non-merged cells).
+        {
+          const linesPerRow = Math.ceil(plan.neededLines / plan.rowSpan);
+          const perLine     = lineHeightForSize(plan.fontSize);
+          const neededH     = linesPerRow * perLine + 2; // +2pt for top/bottom cell padding
+
+          for (let r = rowNum; r < rowNum + plan.rowSpan; r++) {
+            const cur = rowNeededHeight.get(r) || 0;
+            if (cur < neededH) rowNeededHeight.set(r, neededH);
           }
-        });
+        }
       });
+    });
 
-      let changedRowCount = 0;
-      for (const [rowNum, needed] of rowNeededHeight.entries()) {
-        const h = Math.min(needed, 409);
-        ws.getRow(rowNum).height = h;
-        changedRowCount++;
-      }
+    // Apply the computed heights; cap at Excel's maximum row height of 409pt
+    let changedRowCount = 0;
+    for (const [rowNum, needed] of rowNeededHeight.entries()) {
+      ws.getRow(rowNum).height = Math.min(needed, 409);
+      changedRowCount++;
+    }
 
     log(t().logSheet(ws.name, cellsInSheet, wrappedCount, changedRowCount));
   }
 
-  const outBuf = await wb.xlsx.writeBuffer();
+  // Serialise the modified workbook and trigger a browser download
+  const outBuf  = await wb.xlsx.writeBuffer();
   const outName = file.name.replace(/\.xlsx$/i, '') + '_fixed.xlsx';
-  const blob = new Blob([outBuf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
+  const blob    = new Blob([outBuf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url     = URL.createObjectURL(blob);
+  const a       = document.createElement('a');
   a.href = url; a.download = outName;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -510,6 +583,8 @@ async function processSingleFile(file, targetFont, alignMode) {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// Entry point: collect valid files, process them sequentially, then re-enable the button.
+// Sequential (not parallel) to avoid overwhelming the browser's download manager.
 async function processWorkbooks() {
   const validFiles = selectedFiles.filter(e => !e.bad).map(e => e.file);
   if (validFiles.length === 0) return;
@@ -518,12 +593,12 @@ async function processWorkbooks() {
   processBtn.disabled = true;
 
   const targetFont = $('fontSelect').value;
-  const alignMode = $('alignSelect').value;
+  const alignMode  = $('alignSelect').value;
 
   log(t().logStart(targetFont, alignMode), 'ok');
   if (validFiles.length > 1) log(t().logBatchStart(validFiles.length), 'ok');
 
-  let okCount = 0;
+  let okCount   = 0;
   let failCount = 0;
 
   for (let i = 0; i < validFiles.length; i++) {
@@ -537,7 +612,7 @@ async function processWorkbooks() {
       log(t().logError(err.message), 'err');
       failCount++;
     }
-    // Đệm nhỏ giữa các download để browser không chặn
+    // Small delay between downloads so the browser does not block them
     if (i < validFiles.length - 1) await sleep(250);
   }
 
@@ -551,6 +626,5 @@ async function processWorkbooks() {
 }
 
 processBtn.addEventListener('click', processWorkbooks);
-
 
 applyLang('ja');
