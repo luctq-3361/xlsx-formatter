@@ -255,13 +255,12 @@ function handleFiles(files) {
 // Reusable Canvas 2D context — used only for measureText(), never rendered.
 const _measCtx = document.createElement('canvas').getContext('2d');
 
-// Max-digit width (MDW): pixel width of '0' in Excel's Normal font (Calibri 11pt).
-// Excel column width is expressed in units of this character width, so MDW is
-// the conversion factor from Excel char units → CSS pixels.
-const _normalMDW = (() => {
-  _measCtx.font = '11pt Calibri, Arial, sans-serif';
-  return _measCtx.measureText('0').width;
-})();
+// Max-digit width (MDW) for Excel's Normal style font (Calibri 11pt at 96 DPI).
+// Defined in the OOXML spec as ~7 px. Hardcoded to avoid the font-fallback error
+// on macOS (where Calibri is often absent, making Canvas fall back to Arial at
+// ~8 px — a 14% overestimate that causes column widths to be computed too wide,
+// leading to underestimated line counts and clipped row heights).
+const _EXCEL_MDW = 7;
 
 // Count the number of wrapped lines for a single text segment (no newlines).
 // Mimics Excel's word-wrap rules:
@@ -315,8 +314,10 @@ function measureTextLines(text, colWidthChars, fontSize, fontFamily) {
   const s = String(text);
   if (!s) return 1;
 
-  // Convert column width to pixels; subtract 1 char unit for Excel's cell padding
-  const colPx = Math.max(1, (colWidthChars - 1) * _normalMDW);
+  // OOXML formula: rawColumnPx = numChars × MDW + 5 (5 px grid/border padding).
+  // Usable content area = rawColumnPx − 10 px (Excel's 3.75 pt margin × 2 sides).
+  // Simplified: contentPx = numChars × MDW − 5.
+  const colPx = Math.max(1, colWidthChars * _EXCEL_MDW - 5);
   _measCtx.font = `${fontSize}pt ${fontFamily}`;
 
   let total = 0;
@@ -464,8 +465,8 @@ async function processSingleFile(file, targetFont, alignMode) {
           baseW = ws.getColumn(colNum).width || 8.43;
         }
 
-        // Subtract 1 char unit to account for Excel's internal cell padding
-        const usableBase = Math.max(2, baseW - 1);
+        // Pass raw column width — measureTextLines converts to usable px internally
+        const usableBase = Math.max(2, baseW);
         const fontName = targetFont === 'keep' ? (cell.font?.name || 'Yu Gothic') : targetFont;
         const neededLines = measureTextLines(displayVal, usableBase, fs, fontName);
 
