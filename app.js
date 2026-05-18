@@ -13,6 +13,8 @@ const I18N = {
     dropHint: 'hoặc click để chọn nhiều file',
     settingFont: 'Font',
     settingAlign: 'Căn lề',
+    helpFont: 'Chọn font chữ áp dụng cho toàn bộ file. Yu Gothic hỗ trợ đầy đủ ký tự tiếng Nhật và Latin, được khuyến nghị cho file xuất từ Google Sheets.',
+    helpAlign: 'Cài đặt căn chỉnh ngang và dọc cho tất cả ô. "Tự động" căn trái cho ô chứa chữ, căn phải cho ô chứa số. "Giữ nguyên" giữ nguyên căn chỉnh hiện tại của từng ô.',
     fontKeep: 'Giữ nguyên font gốc',
     fontRecommended: 'Yu Gothic (khuyến nghị)',
     alignKeep: 'Giữ nguyên',
@@ -50,6 +52,8 @@ const I18N = {
     dropHint: 'またはクリックして複数選択',
     settingFont: 'フォント',
     settingAlign: 'データの配置',
+    helpFont: 'ファイル全体に適用するフォントを選択します。Yu Gothic は日本語・英数字の両方を正しく表示でき、Google Sheets からの書き出しに推奨されます。',
+    helpAlign: 'すべてのセルの横揃え・縦揃えを一括設定します。「自動」はテキストセルを左揃え・数値セルを右揃えにします。「そのまま維持」は既存の配置を保持します。',
     fontKeep: '元のフォントを維持',
     fontRecommended: 'Yu Gothic (推奨)',
     alignKeep: 'そのまま維持',
@@ -547,5 +551,6 @@ async function processWorkbooks() {
 }
 
 processBtn.addEventListener('click', processWorkbooks);
+
 
 applyLang('ja');
